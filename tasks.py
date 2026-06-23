@@ -1,128 +1,30 @@
-import asyncio
 from datetime import date
-import requests
-from requests.auth import HTTPBasicAuth
-from pyzeebe import ZeebeClient, ZeebeWorker, create_camunda_cloud_channel
 
-API_BASE_URL = "https://travel-insurance-api.aws-playground.viadee.cloud"
-API_USERNAME = "user1"
-API_PASSWORD = "m7Qb2Xr9"
-
-def search_partner_by_number(partnernummer: str):
-    response = requests.get(
-        f"{API_BASE_URL}/partner/{partnernummer}",
-        auth=HTTPBasicAuth(API_USERNAME, API_PASSWORD),
-        timeout=10
-    )
-    if response.status_code == 404:
-        return None
-    response.raise_for_status()
-    return response.json()
-
-def search_partner_by_data(policy_holder: dict):
-    api_payload = {
-        "firstName": policy_holder.get("firstname"),
-        "lastName": policy_holder.get("lastname"),
-        "birthDate": policy_holder.get("birthday"),
-        "phoneNumber": policy_holder.get("phoneNumber", ""),
-        "emailAddress": policy_holder.get("mail", "")
-    }
-    
-    address = policy_holder.get("address", {})
-    if address:
-        api_payload["address"] = {
-            "street": address.get("street", ""),
-            "postalCode": address.get("postCode", ""),
-            "city": address.get("city", "")
-        }
-
-    response = requests.post(
-        f"{API_BASE_URL}/partner/search",
-        json=api_payload,
-        auth=HTTPBasicAuth(API_USERNAME, API_PASSWORD),
-        timeout=10
-    )
-    
-    if response.status_code == 404:
-        return None
-    response.raise_for_status()
-    
-    try:
-        data = response.json()
-        if isinstance(data, list):
-            return data[0] if data else None
-        return data.get("partnerId") and data or None
-    except ValueError:
-        return None
-
-def create_partner(policy_holder: dict):
-    api_payload = {
-        "firstName": policy_holder.get("firstname"),
-        "lastName": policy_holder.get("lastname"),
-        "birthDate": policy_holder.get("birthday"),
-        "phoneNumber": policy_holder.get("phoneNumber", ""),
-        "emailAddress": policy_holder.get("mail", "")
-    }
-    
-    address = policy_holder.get("address", {})
-    if address:
-            api_payload["address"] = {
-                "street": address.get("street", ""),
-                "number": address.get("number", ""),                 
-                "postalCode": address.get("postCode", ""),
-                "city": address.get("city", ""),
-                "countryCode": address.get("country", "")       
-            }
-
-    response = requests.post(
-        f"{API_BASE_URL}/partner",
-        json=api_payload,
-        auth=HTTPBasicAuth(API_USERNAME, API_PASSWORD),
-        timeout=10
-    )
-
-    response.raise_for_status()
-    
-    raw_response = response.text.strip().replace('"', '') 
-    
-    if raw_response:
-        print(f"Erfolgreich angelegt. Echte Partner-ID: {raw_response}")
-        return {"partnerId": raw_response}
-    else:
-        return {"partnerId": ""}
-    
-
-def normalize(value):
-    return str(value or "").lower().replace(" ", "").strip()
+from partner_api import (
+    search_partner_by_number,
+    search_partner_by_data,
+    create_partner
+)
+from insurance_api import save_insurance_policy, print_documents
+from utils import addresses_match
 
 
-def addresses_match(policy_holder: dict, partner: dict):
-    input_address = policy_holder.get("address", {})
-    partner_address = partner.get("address", {})
-    
-    return (
-        normalize(input_address.get("street")) == normalize(partner_address.get("street"))
-        and normalize(input_address.get("postCode")) == normalize(partner_address.get("postalCode"))
-        and normalize(input_address.get("city")) == normalize(partner_address.get("city"))
-    )
-
-async def main():
-    channel = create_camunda_cloud_channel(
-        client_id="ltwJt9mnJ5L4LQ_pNY_ok-Mrmm5ZGgXg",
-        client_secret="iO_98rmtktOHI3wy0GHaw97BV55YKz7.8GIN.gJRcc.r~aeMpqIqcGLqg2lgjGEU",
-        cluster_id="98230c11-3e6c-42f5-8e66-07928c4229b8",
-        region="fra-1"
-    )
-
-    worker = ZeebeWorker(channel)
+def register_tasks(worker):
+    # In dieser Funktion werden alle Camunda Service Tasks registriert.
 
     @worker.task(task_type="validate-data")
     def validate_data(travelInsurance: dict):
         print("Daten validieren...")
+
+        # Reisedaten aus den Prozessvariablen holen.
         travel_data = travelInsurance.get("travelData", {})
+
+        # Werte für die Validierung vorbereiten.
         beginn = date.fromisoformat(travel_data.get("start"))
         ende = date.fromisoformat(travel_data.get("end"))
         kosten = float(travel_data.get("cost", 0))
+
+        # Ergebnisse werden an Camunda zurückgegeben und können im Gateway benutzt werden.
         return {
             "datenGueltig": beginn < ende and beginn > date.today() and kosten > 0,
             "reisebeginnVorReiseende": beginn < ende,
@@ -133,18 +35,29 @@ async def main():
     @worker.task(task_type="search-vn")
     def search_vn(travelInsurance: dict):
         print("VN im Partnersystem suchen...")
+
+        # Versicherungsnehmer aus dem Antrag lesen.
         policy_holder = travelInsurance.get("policyHolder", {})
+
+        # Prüfen, ob schon eine Partnernummer angegeben wurde.
         partnernummer = policy_holder.get("id", "")
 
         if not partnernummer:
             return {"partnernummerAngegeben": False}
 
         try:
+            # Partner mit der angegebenen Partnernummer suchen.
             partner = search_partner_by_number(partnernummer)
+
             if partner is None:
-                return {"partnernummerAngegeben": True, "partnerMitPartnernummerGefunden": False}
-            
+                return {
+                    "partnernummerAngegeben": True,
+                    "partnerMitPartnernummerGefunden": False
+                }
+
+            # Adresse aus Antrag und Partnersystem vergleichen.
             adresse_stimmt = addresses_match(policy_holder, partner)
+
             return {
                 "partnernummerAngegeben": True,
                 "partnerMitPartnernummerGefunden": True,
@@ -152,33 +65,50 @@ async def main():
                 "partnerAusApi": partner,
                 "adresseStimmtUeberein": adresse_stimmt
             }
+
         except Exception as e:
+            # Bei technischen Fehlern wird apiFehler gesetzt.
             print("Fehler bei search-vn:", e)
-            return {"partnernummerAngegeben": True, "partnerMitPartnernummerGefunden": False, "apiFehler": True}
+            return {
+                "partnernummerAngegeben": True,
+                "partnerMitPartnernummerGefunden": False,
+                "apiFehler": True
+            }
 
     @worker.task(task_type="search-partner")
     def search_partner(travelInsurance: dict):
         print("Partner im System suchen...")
+
         try:
+            # Suche ohne Partnernummer, also über die persönlichen Daten.
             partner = search_partner_by_data(travelInsurance.get("policyHolder", {}))
+
             if partner is None:
                 return {"partnerPerSucheGefunden": False}
+
             return {
                 "partnerPerSucheGefunden": True,
                 "partnernummer": partner.get("partnerId"),
                 "partnerAusApi": partner
             }
+
         except Exception as e:
             print("Fehler bei search-partner:", e)
-            return {"partnerPerSucheGefunden": False, "apiFehler": True}
+            return {
+                "partnerPerSucheGefunden": False,
+                "apiFehler": True
+            }
 
     @worker.task(task_type="create-partner")
     def create_partner_task(travelInsurance: dict):
         print("Neukundin im System anlegen...")
+
         try:
+            # Falls kein Partner gefunden wurde, wird ein neuer Partner angelegt.
             partner = create_partner(travelInsurance.get("policyHolder", {}))
             new_partner_id = partner.get("partnerId", "")
 
+            # Die neue Partnernummer wird auch im travelInsurance-Objekt gespeichert.
             if "policyHolder" not in travelInsurance:
                 travelInsurance["policyHolder"] = {}
 
@@ -204,22 +134,26 @@ async def main():
     def vertrag_speichern(travelInsurance: dict, partnernummer: str = "", Selbstbehalt: int = 0):
         print("Vertrag speichern in API...")
 
+        # Für den Vertrag brauchen wir eine gültige Partnernummer.
         p_id = partnernummer
+
         if not p_id:
             p_id = travelInsurance.get("policyHolder", {}).get("id", "")
 
         if not p_id:
-            print("Keine Partnernummer gefunden!")
             return {
                 "apiFehler": True,
                 "vertragGespeichert": False,
                 "fehlermeldung": "Keine Partnernummer gefunden"
             }
 
+        # Reisedaten aus den Prozessvariablen holen.
         travel_data = travelInsurance.get("travelData", {})
 
+        # Versicherte Personen auslesen.
         insured_persons_input = travelInsurance.get("insuredPartners", [])
 
+        # Versicherte Personen in das Format der API umwandeln.
         insured_persons = []
         for person in insured_persons_input:
             insured_persons.append({
@@ -229,6 +163,7 @@ async def main():
                 "childOfInsuranceTaker": person.get("childOfPolicyHolder", False)
             })
 
+        # Payload für die Insurance-Policy-API zusammenbauen.
         payload = {
             "insuranceTakerId": p_id,
             "travelDetails": {
@@ -250,22 +185,8 @@ async def main():
         try:
             print(f"Sende Payload an API: {payload}")
 
-            response = requests.post(
-                f"{API_BASE_URL}/insurance-policy",
-                json=payload,
-                auth=HTTPBasicAuth(API_USERNAME, API_PASSWORD),
-                timeout=10
-            )
-
-            print("Insurance Policy API Status:", response.status_code)
-            print("Insurance Policy API Antwort:", response.text)
-
-            if response.status_code >= 400:
-                print(f"API Fehler Antwort: {response.text}")
-
-            response.raise_for_status()
-
-            versicherungsnummer = response.text.strip().replace('"', "")
+            # Vertrag speichern und Versicherungsnummer zurückbekommen.
+            versicherungsnummer = save_insurance_policy(payload)
 
             return {
                 "versicherungsnummer": versicherungsnummer,
@@ -284,23 +205,29 @@ async def main():
     @worker.task(task_type="unterlagen-senden")
     def unterlagen_senden(versicherungsnummer: str = "V-UNBEKANNT"):
         print(f"Vertragsunterlagen für Vertrag {versicherungsnummer} drucken und senden...")
+
         try:
-            response = requests.post(
-                f"{API_BASE_URL}/documents/print", 
-                json={"versicherungsnummer": versicherungsnummer},
-                auth=HTTPBasicAuth(API_USERNAME, API_PASSWORD),
-                timeout=10
-            )
-            if response.status_code == 404:
+            # Die Versicherungsnummer wird an die Dokumenten-API übergeben.
+            response = print_documents(versicherungsnummer)
+
+            # Laut Swagger bedeutet 202, dass der Druckauftrag angenommen wurde.
+            if response.status_code == 202:
                 return {"unterlagenGesendet": True}
+
+            # Wenn die Police nicht gefunden wurde.
+            if response.status_code == 404:
+                return {
+                    "unterlagenGesendet": False,
+                    "printWarnung": "Versicherungspolice wurde nicht gefunden"
+                }
+
             response.raise_for_status()
+
             return {"unterlagenGesendet": True}
+
         except Exception as e:
             print("Fehler beim Drucken:", e)
-            return {"unterlagenGesendet": True, "printWarnung": str(e)}
-
-    print("Worker läuft mit Camunda Cloud...")
-    await worker.work()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            return {
+                "unterlagenGesendet": False,
+                "printWarnung": str(e)
+            }
