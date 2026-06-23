@@ -68,11 +68,10 @@ def create_partner(policy_holder: dict):
     if address:
             api_payload["address"] = {
                 "street": address.get("street", ""),
-                "number": str(address.get("number", "")),                 # 👈 إضافة رقم المنزل
-                "postalCode": address.get("zipCode", ""),
+                "number": address.get("number", ""),                 
+                "postalCode": address.get("postCode", ""),
                 "city": address.get("city", ""),
-                "countryCode": str(address.get("countryCode", ""))        # 👈 إضافة كود الدولة
-                # ملاحظة: إذا كان اسم الحقل في الفورم هو country، غيّرها إلى address.get("country", "")
+                "countryCode": address.get("country", "")       
             }
 
     response = requests.post(
@@ -81,9 +80,9 @@ def create_partner(policy_holder: dict):
         auth=HTTPBasicAuth(API_USERNAME, API_PASSWORD),
         timeout=10
     )
+
     response.raise_for_status()
     
-    # قراءة الاستجابة كنص صريح واستخراج الرقم الحقيقي للعميل
     raw_response = response.text.strip().replace('"', '') 
     
     if raw_response:
@@ -91,15 +90,20 @@ def create_partner(policy_holder: dict):
         return {"partnerId": raw_response}
     else:
         return {"partnerId": ""}
+    
+
+def normalize(value):
+    return str(value or "").lower().replace(" ", "").strip()
+
 
 def addresses_match(policy_holder: dict, partner: dict):
     input_address = policy_holder.get("address", {})
     partner_address = partner.get("address", {})
     
     return (
-        input_address.get("street") == partner_address.get("street")
-        and input_address.get("postCode") == partner_address.get("postalCode")
-        and input_address.get("city") == partner_address.get("city")
+        normalize(input_address.get("street")) == normalize(partner_address.get("street"))
+        and normalize(input_address.get("postCode")) == normalize(partner_address.get("postalCode"))
+        and normalize(input_address.get("city")) == normalize(partner_address.get("city"))
     )
 
 async def main():
@@ -175,7 +179,6 @@ async def main():
             partner = create_partner(travelInsurance.get("policyHolder", {}))
             new_partner_id = partner.get("partnerId", "")
 
-            # تحديث الـ id داخل travelInsurance نفسه
             if "policyHolder" not in travelInsurance:
                 travelInsurance["policyHolder"] = {}
 
@@ -200,48 +203,83 @@ async def main():
     @worker.task(task_type="vertrag-speichern")
     def vertrag_speichern(travelInsurance: dict, partnernummer: str = "", Selbstbehalt: int = 0):
         print("Vertrag speichern in API...")
-        
-        # الاعتماد المباشر على المعرف الذي تم إنشاؤه
+
         p_id = partnernummer
         if not p_id:
             p_id = travelInsurance.get("policyHolder", {}).get("id", "")
 
+        if not p_id:
+            print("Keine Partnernummer gefunden!")
+            return {
+                "apiFehler": True,
+                "vertragGespeichert": False,
+                "fehlermeldung": "Keine Partnernummer gefunden"
+            }
+
         travel_data = travelInsurance.get("travelData", {})
-        
+
+        insured_persons_input = travelInsurance.get("insuredPartners", [])
+
+        insured_persons = []
+        for person in insured_persons_input:
+            insured_persons.append({
+                "firstName": person.get("firstname", ""),
+                "lastName": person.get("lastname", ""),
+                "birthDate": person.get("birthday", ""),
+                "childOfInsuranceTaker": person.get("childOfPolicyHolder", False)
+            })
+
         payload = {
             "insuranceTakerId": p_id,
             "travelDetails": {
                 "begin": travel_data.get("start", ""),
                 "end": travel_data.get("end", ""),
                 "destinationCountryCode": travel_data.get("destination", ""),
-                "totalCost": int(float(travel_data.get("cost", 0))), 
+                "totalCost": int(float(travel_data.get("cost", 0))),
                 "currency": travel_data.get("currency", "EUR")
             },
             "coverage": {
                 "costRetention": Selbstbehalt or 0,
-                "withBaggageCoverage": False,
-                "withTravelAbortionCoverage": False,
+                "withBaggageCoverage": travelInsurance.get("baggageInsurance", False),
+                "withTravelAbortionCoverage": travelInsurance.get("travelCancellation", False),
                 "withTravelExtensionCoverage": False
-            }
+            },
+            "insuredPersons": insured_persons
         }
 
         try:
             print(f"Sende Payload an API: {payload}")
+
             response = requests.post(
                 f"{API_BASE_URL}/insurance-policy",
                 json=payload,
                 auth=HTTPBasicAuth(API_USERNAME, API_PASSWORD),
                 timeout=10
             )
-            
+
+            print("Insurance Policy API Status:", response.status_code)
+            print("Insurance Policy API Antwort:", response.text)
+
             if response.status_code >= 400:
                 print(f"API Fehler Antwort: {response.text}")
-                
+
             response.raise_for_status()
-            return {"versicherungsnummer": response.json().get("policyId", "V-UNBEKANNT")}
+
+            versicherungsnummer = response.text.strip().replace('"', "")
+
+            return {
+                "versicherungsnummer": versicherungsnummer,
+                "vertragGespeichert": True,
+                "apiFehler": False
+            }
+
         except Exception as e:
             print("Fehler beim Speichern des Vertrags:", e)
-            return {"apiFehler": True}
+            return {
+                "apiFehler": True,
+                "vertragGespeichert": False,
+                "fehlermeldung": str(e)
+            }
 
     @worker.task(task_type="unterlagen-senden")
     def unterlagen_senden(versicherungsnummer: str = "V-UNBEKANNT"):
