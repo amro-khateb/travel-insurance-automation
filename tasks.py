@@ -6,7 +6,7 @@ from partner_api import (
     create_partner
 )
 from insurance_api import save_insurance_policy, print_documents
-from utils import addresses_match
+from utils import addresses_match, normalize
 
 
 def register_tasks(worker):
@@ -96,12 +96,13 @@ def register_tasks(worker):
             print("Fehler bei search-partner:", e)
             return {
                 "partnerPerSucheGefunden": False,
-                "apiFehler": True
+                "apiFehler": True,
+                "fehlermeldung": str(e)
             }
 
     @worker.task(task_type="create-partner")
     def create_partner_task(travelInsurance: dict):
-        print("Neukundin im System anlegen...")
+        print("Neukunde im System anlegen...")
 
         try:
             # Falls kein Partner gefunden wurde, wird ein neuer Partner angelegt.
@@ -114,19 +115,18 @@ def register_tasks(worker):
 
             travelInsurance["policyHolder"]["id"] = new_partner_id
 
-            print("Neue Partnernummer wird an Camunda zurückgegeben:", new_partner_id)
 
             return {
                 "partnernummer": new_partner_id,
                 "partnerAusApi": partner,
-                "neukundinAngelegt": True,
+                "neukundeAngelegt": True,
                 "travelInsurance": travelInsurance
             }
 
         except Exception as e:
             print("Fehler bei create-partner:", e)
             return {
-                "neukundinAngelegt": False,
+                "neukundeAngelegt": False,
                 "apiFehler": True
             }
 
@@ -157,8 +157,8 @@ def register_tasks(worker):
         insured_persons = []
         for person in insured_persons_input:
             insured_persons.append({
-                "firstName": person.get("firstname", ""),
-                "lastName": person.get("lastname", ""),
+                "firstName": normalize(person.get("firstname", "")),
+                "lastName": normalize(person.get("lastname", "")),
                 "birthDate": person.get("birthday", ""),
                 "childOfInsuranceTaker": person.get("childOfPolicyHolder", False)
             })
@@ -174,7 +174,7 @@ def register_tasks(worker):
                 "currency": travel_data.get("currency", "EUR")
             },
             "coverage": {
-                "costRetention": Selbstbehalt or 0,
+                "costRetention": Selbstbehalt,
                 "withBaggageCoverage": travelInsurance.get("baggageInsurance", False),
                 "withTravelAbortionCoverage": travelInsurance.get("travelCancellation", False),
                 "withTravelExtensionCoverage": False
@@ -183,7 +183,6 @@ def register_tasks(worker):
         }
 
         try:
-            print(f"Sende Payload an API: {payload}")
 
             # Vertrag speichern und Versicherungsnummer zurückbekommen.
             versicherungsnummer = save_insurance_policy(payload)
@@ -202,9 +201,9 @@ def register_tasks(worker):
                 "fehlermeldung": str(e)
             }
 
-    @worker.task(task_type="unterlagen-senden")
-    def unterlagen_senden(versicherungsnummer: str = "V-UNBEKANNT"):
-        print(f"Vertragsunterlagen für Vertrag {versicherungsnummer} drucken und senden...")
+    @worker.task(task_type="unterlagen-drucken")
+    def unterlagen_drucken(versicherungsnummer: str = "V-UNBEKANNT"):
+        print(f"Vertragsunterlagen für Vertrag {versicherungsnummer} drucken...")
 
         try:
             # Die Versicherungsnummer wird an die Dokumenten-API übergeben.
@@ -212,22 +211,22 @@ def register_tasks(worker):
 
             # Laut Swagger bedeutet 202, dass der Druckauftrag angenommen wurde.
             if response.status_code == 202:
-                return {"unterlagenGesendet": True}
+                return {"unterlagenGedruckt": True}
 
             # Wenn die Police nicht gefunden wurde.
             if response.status_code == 404:
                 return {
-                    "unterlagenGesendet": False,
+                    "unterlagenGedruckt": False,
                     "printWarnung": "Versicherungspolice wurde nicht gefunden"
                 }
 
             response.raise_for_status()
 
-            return {"unterlagenGesendet": True}
+            return {"unterlagenGedruckt": True}
 
         except Exception as e:
             print("Fehler beim Drucken:", e)
             return {
-                "unterlagenGesendet": False,
+                "unterlagenGedruckt": False,
                 "printWarnung": str(e)
             }

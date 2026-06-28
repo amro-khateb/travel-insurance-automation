@@ -1,6 +1,7 @@
 import requests
 from requests.auth import HTTPBasicAuth
 from config import API_BASE_URL, API_USERNAME, API_PASSWORD
+from utils import normalize
 
 
 def search_partner_by_number(partnernummer: str):
@@ -23,16 +24,14 @@ def search_partner_by_number(partnernummer: str):
 
 
 def search_partner_by_data(policy_holder: dict):
-    # Daten aus dem Antrag in das Format der Partner-API bringen.
     api_payload = {
-        "firstName": policy_holder.get("firstname"),
-        "lastName": policy_holder.get("lastname"),
-        "birthDate": policy_holder.get("birthday"),
+        "firstName": normalize(policy_holder.get("firstname", "")),
+        "lastName": normalize(policy_holder.get("lastname", "")),
+        "birthDate": policy_holder.get("birthday", ""),
         "phoneNumber": policy_holder.get("phoneNumber", ""),
-        "emailAddress": policy_holder.get("mail", "")
+        "emailAddress": normalize(policy_holder.get("mail", ""))
     }
 
-    # Adresse nur mitschicken, wenn sie im Antrag vorhanden ist.
     address = policy_holder.get("address", {})
     if address:
         api_payload["address"] = {
@@ -43,10 +42,7 @@ def search_partner_by_data(policy_holder: dict):
             "countryCode": address.get("country", "")
         }
 
-    # Payload zur Kontrolle ausgeben.
-    print("Partner-Suche Payload:", api_payload)
 
-    # Suche über die Partner-API starten.
     response = requests.post(
         f"{API_BASE_URL}/partner/search",
         json=api_payload,
@@ -55,41 +51,39 @@ def search_partner_by_data(policy_holder: dict):
     )
 
 
-    # Wenn kein Partner gefunden wurde, ist das kein technischer Fehler.
-    # Dann kann später ein neuer Partner angelegt werden.
     if response.status_code == 404:
         return None
 
-    # Falls die API intern einen Fehler hat, brechen wir den Prozess hier nicht ab.
-    # Es wird dann einfach kein Partner gefunden.
     if response.status_code >= 500:
-        return None
+        raise Exception(f"Partner API Fehler: {response.status_code} - {response.text}")
 
     response.raise_for_status()
 
-    try:
-        data = response.json()
+    data = response.json()
 
-        # Die API kann eine Liste zurückgeben.
-        if isinstance(data, list):
-            return data[0] if data else None
-
-        # Falls ein einzelnes Objekt zurückkommt.
-        return data.get("partnerId") and data or None
-
-    except ValueError:
-        # Falls die Antwort nicht als JSON gelesen werden kann.
+    if isinstance(data, list):
+        if data:
+            print("Partner gefunden:", data[0].get("partnerId"))
+            return data[0]
         return None
+
+    if isinstance(data, dict):
+        if data.get("partnerId"):
+            print("Partner gefunden:", data.get("partnerId"))
+            return data
+        return None
+
+    return None
 
 
 def create_partner(policy_holder: dict):
     # Neuen Partner aus den Daten des Versicherungsnehmers erstellen.
     api_payload = {
-        "firstName": policy_holder.get("firstname"),
-        "lastName": policy_holder.get("lastname"),
-        "birthDate": policy_holder.get("birthday"),
+        "firstName": normalize(policy_holder.get("firstname", "")),
+        "lastName": normalize(policy_holder.get("lastname", "")),
+        "birthDate": policy_holder.get("birthday", ""),
         "phoneNumber": policy_holder.get("phoneNumber", ""),
-        "emailAddress": policy_holder.get("mail", "")
+        "emailAddress": normalize(policy_holder.get("mail", ""))
     }
 
     # Adresse aus dem Formular in das Format der API umwandeln.
