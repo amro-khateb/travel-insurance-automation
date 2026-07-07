@@ -67,3 +67,6 @@ The business logic is decoupled from the process flow. Camunda Cloud orchestrate
  ┗ 📜 README.md
 
 ```
+
+
+<img width="14400" height="2715" alt="reisekrankenversicherung_prozess" src="https://github.com/user-attachments/assets/473398cd-9831-4049-b7b4-06a143c3c5c6" />
